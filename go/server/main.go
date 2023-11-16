@@ -1,12 +1,17 @@
 package main
 
 import (
-	"crypto/tls"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
+	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -18,14 +23,9 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:0", "address to listen on")
 	certDir := flag.String("certdir", "certs", "generate certs (if needed) and store them in this dir")
-	var sans []string
-	flag.Func("san", "add another alt name or IP to the generated cert", func(s string) error {
-		sans = append(sans, s)
-		return nil
-	})
 	flag.Parse()
 
-	certFile, keyFile, err := getCerts(*certDir, sans)
+	certFile, keyFile, err := getCerts(*certDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -86,59 +86,86 @@ func (w *loggingWriter) WriteHeader(statusCode int) {
 }
 
 // getCerts parses or generates a server cert.
-func getCerts(dir string, extraSans []string) (string, string, error) {
+func getCerts(dir string) (string, string, error) {
 	certFile := filepath.Join(dir, "server.crt")
-	certKey := filepath.Join(dir, "server.key")
+	keyFile := filepath.Join(dir, "server.key")
 
-	if certExists(certFile, certKey, extraSans, nil) {
-		return certFile, certKey, nil
+	os.Mkdir(dir, 0755)
+	os.Remove(certFile)
+	os.Remove(keyFile)
+
+	key, err := generateKey(keyFile)
+	if err != nil {
+		return "", "", err
 	}
 
-	return "", "", fmt.Errorf("todo: generate certs")
+	_, err = generateCert(certFile, key)
+	if err != nil {
+		return "", "", err
+	}
+
+	return certFile, keyFile, nil
 }
 
-func certExists(certFile, keyFile string, extraSans []string, ips []net.IP) bool {
-	if _, err := os.Stat(keyFile); err != nil {
-		return false
-	}
-
-	certBytes, err := os.ReadFile(certFile)
+func generateKey(keyFile string) (*ecdsa.PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return false
+		return nil, err
 	}
 
-	block, rest := pem.Decode(certBytes)
-	if len(rest) != 0 {
-		// there should only be one cert.
-		return false
-	}
-
-	if block.Type != "CERTIFICATE" {
-		return false
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
+	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return false
+		return nil, fmt.Errorf("failed to serialize private key for new certificate: %w", err)
 	}
 
-        certHasSAN := func(subj string) bool {
-          for _, s := range cert.DNSNames {
-            if s == subj {
-              return true
-            }
-          }
-          return false
-        }
-
-	for _, subj := range extraSans {
-          if !certHasSAN(subj) {
-            return false
-          }
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if keyPEM == nil || len(keyPEM) < 1 {
+		return nil, fmt.Errorf("failed to PEM-encode generated certificate's key")
 	}
 
-        certHasIP := func(ip net.IP) bool {
-          for _, i := range cert.IPAddresses
+	if err := os.WriteFile(keyFile, keyPEM, 0444); err != nil {
+		return nil, err
+	}
 
-	return true
+	return key, nil
+}
+
+func generateCert(certFile string, key *ecdsa.PrivateKey) (*x509.Certificate, error) {
+	serialNumber, err := rand.Int(rand.Reader, big.NewInt(math.MaxInt64))
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate random serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization:       []string{"Spraints"},
+			OrganizationalUnit: []string{"Exp"},
+			CommonName:         "localhost",
+		},
+		NotBefore:             time.Now().Add(-10 * time.Minute),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: false,
+		IPAddresses: []net.IP{
+			net.IPv4(127, 0, 0, 1),
+		},
+	}
+
+	certDer, err := x509.CreateCertificate(rand.Reader, &template, &template, key.Public(), key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform certificate generation")
+	}
+
+	certPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDer})
+	if certPem == nil || len(certPem) < 1 {
+		return nil, fmt.Errorf("failed to PEM-encode generated certificate")
+	}
+
+	if err := os.WriteFile(certFile, certPem, 0444); err != nil {
+		return nil, err
+	}
+
+	return x509.ParseCertificate(certDer)
 }
