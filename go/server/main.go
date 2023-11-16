@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -21,14 +25,9 @@ func main() {
 	})
 	flag.Parse()
 
-	var certFile, keyFile string
-	if *certDir != "" {
-		if f, k, err := generateCerts(*certDir, sans); err != nil {
-			log.Fatal(err)
-		} else {
-			certFile = f
-			keyFile = k
-		}
+	certFile, keyFile, err := getCerts(*certDir, sans)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	listener, err := net.Listen("tcp", *addr)
@@ -86,18 +85,60 @@ func (w *loggingWriter) WriteHeader(statusCode int) {
 	w.w.WriteHeader(statusCode)
 }
 
-func generateCerts(dir string, extraSans []string) (string, string, error) {
+// getCerts parses or generates a server cert.
+func getCerts(dir string, extraSans []string) (string, string, error) {
 	certFile := filepath.Join(dir, "server.crt")
 	certKey := filepath.Join(dir, "server.key")
 
-	if certExists(certFile, certKey, extraSans) {
+	if certExists(certFile, certKey, extraSans, nil) {
 		return certFile, certKey, nil
 	}
 
 	return "", "", fmt.Errorf("todo: generate certs")
 }
 
-func certExists(cert, key string, extraSans []string) bool {
-	// todo
-	return false
+func certExists(certFile, keyFile string, extraSans []string, ips []net.IP) bool {
+	if _, err := os.Stat(keyFile); err != nil {
+		return false
+	}
+
+	certBytes, err := os.ReadFile(certFile)
+	if err != nil {
+		return false
+	}
+
+	block, rest := pem.Decode(certBytes)
+	if len(rest) != 0 {
+		// there should only be one cert.
+		return false
+	}
+
+	if block.Type != "CERTIFICATE" {
+		return false
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+
+        certHasSAN := func(subj string) bool {
+          for _, s := range cert.DNSNames {
+            if s == subj {
+              return true
+            }
+          }
+          return false
+        }
+
+	for _, subj := range extraSans {
+          if !certHasSAN(subj) {
+            return false
+          }
+	}
+
+        certHasIP := func(ip net.IP) bool {
+          for _, i := range cert.IPAddresses
+
+	return true
 }
