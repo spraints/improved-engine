@@ -16,13 +16,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:0", "address to listen on")
 	certDir := flag.String("certdir", "certs", "generate certs (if needed) and store them in this dir")
+	maxStreams := flag.Int("max-streams", 0, "max concurrent streams for http/2 server (0 uses Go's default)")
+	verbose := flag.Bool("verbose", false, "log every request")
 	flag.Parse()
 
 	certFile, keyFile, err := getCerts(*certDir)
@@ -37,9 +42,52 @@ func main() {
 	log.Printf("listening on %v", listener.Addr())
 
 	mux := http.NewServeMux()
-	server := &http.Server{
-		Handler: reqLog(mux),
+
+	mux.HandleFunc("/slow", func(_ http.ResponseWriter, r *http.Request) {
+		if sec, err := strconv.ParseUint(r.FormValue("s"), 10, 8); err == nil {
+			time.Sleep(time.Duration(sec) * time.Second)
+		} else {
+			time.Sleep(time.Second)
+		}
+	})
+
+	mux.HandleFunc("/data", func(w http.ResponseWriter, r *http.Request) {
+		var size, blockSize uint64
+		size, _ = strconv.ParseUint(r.FormValue("bytes"), 10, 32)
+		blockSize, _ = strconv.ParseUint(r.FormValue("bs"), 10, 32)
+		if blockSize < 1 {
+			blockSize = 1024 * 1024
+		}
+		data := make([]byte, 0, int(blockSize))
+		for i := 0; i < int(blockSize); i++ {
+			data = append(data, 'a')
+		}
+		rem := int(size)
+		for rem > 0 {
+			toSend := data
+			if rem < len(toSend) {
+				toSend = toSend[:rem]
+			}
+			if sent, err := w.Write(toSend); err != nil {
+				log.Println(err)
+				return
+			} else {
+				rem -= sent
+			}
+		}
+	})
+
+	var h http.Handler = mux
+	if *verbose {
+		h = reqLog(h)
 	}
+
+	server := &http.Server{Handler: h}
+
+	http2.ConfigureServer(server, &http2.Server{
+		MaxConcurrentStreams: uint32(*maxStreams),
+	})
+
 	if err := server.ServeTLS(listener, certFile, keyFile); err != nil {
 	}
 }
@@ -58,11 +106,15 @@ type loggingWriter struct {
 	t      time.Time
 	status int32
 	logged int32
+	length uint64
 }
 
 func (w *loggingWriter) done() {
 	if atomic.CompareAndSwapInt32(&w.logged, 0, 1) {
-		log.Printf("%v %v -> %v (%v)", w.r.Method, w.r.RequestURI, atomic.LoadInt32(&w.status), time.Since(w.t))
+		log.Printf("[%v %v] %v %v -> %v (%v, %d bytes)",
+			w.r.Proto, w.r.RemoteAddr,
+			w.r.Method, w.r.RequestURI,
+			atomic.LoadInt32(&w.status), time.Since(w.t), atomic.LoadUint64(&w.length))
 	}
 }
 
@@ -76,6 +128,7 @@ func (w *loggingWriter) Header() http.Header {
 // Write implements http.ResponseWriter.
 func (w *loggingWriter) Write(data []byte) (int, error) {
 	atomic.CompareAndSwapInt32(&w.status, 0, 200)
+	atomic.AddUint64(&w.length, uint64(len(data)))
 	return w.w.Write(data)
 }
 
