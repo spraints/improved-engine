@@ -23,7 +23,7 @@ const (
 	keyFile  = "certs/server.key"
 
 	// How many requests to make from the client.
-	numRequests = 2
+	numRequests = 20
 
 	// How many clients to run in parallel.
 	numClients = 1
@@ -39,6 +39,7 @@ func main() {
 		log.Fatal("Usage: go run ./frame-size client|server")
 	}
 
+	start := time.Now()
 	switch os.Args[1] {
 	case "client":
 		if err := client(); err != nil {
@@ -51,6 +52,7 @@ func main() {
 	default:
 		log.Fatal("Usage: go run ./frame-size client|server")
 	}
+	log.Printf("Total time: %v", time.Since(start))
 }
 
 func client() error {
