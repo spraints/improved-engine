@@ -23,6 +23,9 @@ const (
 
 	// How many requests to make from the client.
 	numRequests = 15
+
+	// How many clients to run in parallel.
+	numClients = 2
 )
 
 func main() {
@@ -47,6 +50,21 @@ func main() {
 }
 
 func client() error {
+	var wg sync.WaitGroup
+	wg.Add(numClients)
+	for i := 0; i < numClients; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if err := doClient(i); err != nil {
+				log.Printf("client %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	return nil
+}
+
+func doClient(clientNum int) error {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -67,15 +85,15 @@ func client() error {
 	for i := 0; i < numRequests; i++ {
 		go func(i int) {
 			defer wg.Done()
-			doReq(client, i)
+			doReq(client, clientNum, i)
 		}(i)
 	}
 	wg.Wait()
 	return nil
 }
 
-func doReq(client *http.Client, i int) error {
-	url := fmt.Sprintf("https://%s/%d", addr, i)
+func doReq(client *http.Client, clientNum, reqNum int) error {
+	url := fmt.Sprintf("https://%s/%d/%d", addr, clientNum, reqNum)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
@@ -97,7 +115,8 @@ func server() error {
 	srv := &http.Server{
 		Addr: addr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("%v %v %v", r.Proto, r.Method, r.URL)
+			log.Printf("[%v] %v %v %v",
+				r.RemoteAddr, r.Proto, r.Method, r.RequestURI)
 			fmt.Fprintf(w, "OK\n")
 		}),
 	}
