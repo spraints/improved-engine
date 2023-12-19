@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"golang.org/x/net/http2"
 )
@@ -18,9 +20,14 @@ const (
 	// with the server in 'script/server'.
 	certFile = "certs/server.crt"
 	keyFile  = "certs/server.key"
+
+	// How many requests to make from the client.
+	numRequests = 15
 )
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	if len(os.Args) != 2 {
 		log.Fatal("Usage: go run ./frame-size client|server")
 	}
@@ -40,18 +47,13 @@ func main() {
 }
 
 func client() error {
-	req, err := http.NewRequest("GET", "https://"+addr+"/", nil)
-	if err != nil {
-		return err
-	}
-
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
 	}
 
-	_, err = http2.ConfigureTransports(transport)
+	_, err := http2.ConfigureTransports(transport)
 	if err != nil {
 		return err
 	}
@@ -60,13 +62,34 @@ func client() error {
 		Transport: transport,
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(numRequests)
+	for i := 0; i < numRequests; i++ {
+		go func(i int) {
+			defer wg.Done()
+			doReq(client, i)
+		}(i)
+	}
+	wg.Wait()
+	return nil
+}
+
+func doReq(client *http.Client, i int) error {
+	url := fmt.Sprintf("https://%s/%d", addr, i)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("%s %s\n", resp.Proto, resp.Status)
+	elapsed := time.Since(start)
+	log.Printf("%s (%v) -> %s %s\n", url, elapsed, resp.Proto, resp.Status)
 	return nil
 }
 
