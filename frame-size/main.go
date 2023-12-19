@@ -1,9 +1,10 @@
-// Usage: go run ./frame-size client|server
+// Usage: [FRAME_SIZE=1] [GODEBUG=http2debug=1] go run ./frame-size client|server
 package main
 
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -22,10 +23,13 @@ const (
 	keyFile  = "certs/server.key"
 
 	// How many requests to make from the client.
-	numRequests = 15
+	numRequests = 2
 
 	// How many clients to run in parallel.
-	numClients = 2
+	numClients = 1
+
+	// Size of response
+	responseSize = 2 * 1024 * 1024
 )
 
 func main() {
@@ -71,9 +75,12 @@ func doClient(clientNum int) error {
 		},
 	}
 
-	_, err := http2.ConfigureTransports(transport)
+	h2, err := http2.ConfigureTransports(transport)
 	if err != nil {
 		return err
+	}
+	if os.Getenv("FRAME_SIZE") != "" {
+		h2.MaxReadFrameSize = 256 * 1024
 	}
 
 	client := &http.Client{
@@ -85,7 +92,9 @@ func doClient(clientNum int) error {
 	for i := 0; i < numRequests; i++ {
 		go func(i int) {
 			defer wg.Done()
-			doReq(client, clientNum, i)
+			if err := doReq(client, clientNum, i); err != nil {
+				log.Printf("client %d: %v", clientNum, err)
+			}
 		}(i)
 	}
 	wg.Wait()
@@ -108,16 +117,32 @@ func doReq(client *http.Client, clientNum, reqNum int) error {
 
 	elapsed := time.Since(start)
 	log.Printf("%s (%v) -> %s %s\n", url, elapsed, resp.Proto, resp.Status)
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	log.Printf("%s -> %d bytes", url, len(data))
+
 	return nil
 }
 
 func server() error {
+	resp := make([]byte, 0, responseSize)
+	for i := 0; i < responseSize; i++ {
+		if i%40 == 0 {
+			resp = append(resp, '\n')
+		} else {
+			resp = append(resp, 'a')
+		}
+	}
+
 	srv := &http.Server{
 		Addr: addr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[%v] %v %v %v",
 				r.RemoteAddr, r.Proto, r.Method, r.RequestURI)
-			fmt.Fprintf(w, "OK\n")
+			w.Write(resp)
 		}),
 	}
 
