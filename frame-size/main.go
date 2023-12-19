@@ -117,14 +117,13 @@ func doReq(client *http.Client, clientNum, reqNum int) error {
 	}
 	defer resp.Body.Close()
 
-	elapsed := time.Since(start)
-	log.Printf("%s (%v) -> %s %s\n", url, elapsed, resp.Proto, resp.Status)
-
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
-	log.Printf("%s -> %d bytes", url, len(data))
+
+	elapsed := time.Since(start)
+	log.Printf("%s (%v) -> %s %s (%d bytes)\n", url, elapsed, resp.Proto, resp.Status, len(data))
 
 	return nil
 }
